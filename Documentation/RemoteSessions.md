@@ -68,5 +68,19 @@ session, so their connection status and input provenance are separate concerns.
 Do not assume that discovering a physical mouse identifies the source of every
 input event. The auto-pause choice remains independent of such future detection.
 
+Threading follows the shared state, not the number of remote sessions. The
+lifecycle lock serializes start, stop, and policy refresh. The mouse-button lock
+protects injected presses, safety timers, and pause cleanup. Their acquisition
+order is lifecycle then mouse-button, never the reverse; input/timer workers
+must not acquire the lifecycle lock, because shutdown waits for those workers.
+
+WTS notifications, polling, and settings changes currently run on the Qt thread.
+Future background detectors should queue a refresh onto that same owner thread,
+not start/stop the runtime or mutate its state directly. The engine then reads
+the current detection snapshot under the lifecycle lock. If detection later
+becomes asynchronous, stale results must be rejected before policy is applied;
+a mutex alone does not make an old observation current. UI callbacks must remain
+non-blocking and queued, as the current backend's session notification is.
+
 This is an interface boundary only. No additional providers, detection heuristics,
 configuration options, or per-event filtering are implemented in this change.

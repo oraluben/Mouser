@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event, Thread as RealThread
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -248,6 +249,62 @@ class EngineRemoteSessionTests(unittest.TestCase):
         self.engine.refresh_remote_session()
         self.engine.hook.start.assert_called_once()
         self.engine._app_detector.start.assert_called_once()
+
+    def test_concurrent_resume_waits_until_pause_cleanup_finishes(self):
+        self.engine.start()
+        self.engine.hook.start.reset_mock()
+        cleanup_entered, release_cleanup = Event(), Event()
+        resume_requested, resume_finished = Event(), Event()
+        operations, errors = [], []
+
+        def cleanup():
+            operations.append("cleanup started")
+            cleanup_entered.set()
+            if not release_cleanup.wait(2):
+                raise TimeoutError("test did not release pause cleanup")
+            operations.append("cleanup finished")
+
+        def refresh(requested=None, finished=None):
+            if requested:
+                requested.set()
+            try:
+                self.engine.refresh_remote_session()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                if finished:
+                    finished.set()
+
+        self.engine.hook.stop.side_effect = cleanup
+        self.engine.hook.start.side_effect = lambda: operations.append("runtime resumed")
+        self.state = True
+        # Use real caller threads; the engine's device workers remain mocked.
+        pause_thread = RealThread(target=refresh, daemon=True)
+        resume_thread = RealThread(
+            target=refresh, args=(resume_requested, resume_finished), daemon=True,
+        )
+        pause_thread.start()
+        try:
+            self.assertTrue(cleanup_entered.wait(2))
+            self.state = False
+            resume_thread.start()
+            self.assertTrue(resume_requested.wait(2))
+            self.assertFalse(resume_finished.wait(0.1))
+            self.assertEqual(operations, ["cleanup started"])
+        finally:
+            release_cleanup.set()
+            pause_thread.join(2)
+            if resume_thread.ident is not None:
+                resume_thread.join(2)
+        self.assertFalse(pause_thread.is_alive())
+        self.assertFalse(resume_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(operations, [
+            "cleanup started", "cleanup finished", "runtime resumed",
+        ])
+        self.assertFalse(self.engine.remote_paused)
+        self.engine.hook.stop.assert_called_once()
+        self.engine.hook.start.assert_called_once()
 
     def test_restart_applies_policy_even_when_session_type_is_unchanged(self):
         for remote in (False, True):
