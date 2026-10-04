@@ -278,7 +278,8 @@ class EngineHorizontalScrollTests(unittest.TestCase):
             patch("core.engine.threading.Thread", _ImmediateThread),
             patch("time.sleep", return_value=None),
         ):
-            engine.start()
+            with patch("core.engine.is_remote_session", return_value=False):
+                engine.start()
 
         expected = engine.cfg["settings"]["dpi"]
         engine.hook._hid_gesture.set_dpi.assert_called_once_with(expected)
@@ -489,7 +490,8 @@ class EngineReplayPhaseOneTests(unittest.TestCase):
             patch("core.engine.threading.Thread", side_effect=self._thread_factory(threads)),
             patch("core.engine.time.sleep", return_value=None),
         ):
-            engine.start()
+            with patch("core.engine.is_remote_session", return_value=False):
+                engine.start()
             startup_threads = list(self._non_battery_threads(threads))
             self.assertEqual(len(startup_threads), 1)
 
