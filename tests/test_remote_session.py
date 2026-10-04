@@ -242,6 +242,31 @@ class EngineRemoteSessionTests(unittest.TestCase):
         self.engine.refresh_remote_session()
         self.engine.hook.start.assert_not_called()
 
+    def test_repeated_start_does_not_install_duplicate_input_runtime(self):
+        self.engine.start()
+        self.engine.start()
+        self.engine.refresh_remote_session()
+        self.engine.hook.start.assert_called_once()
+        self.engine._app_detector.start.assert_called_once()
+
+    def test_restart_applies_policy_even_when_session_type_is_unchanged(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                self.state = remote
+                self.engine.start()
+                self.engine.stop()
+                self.engine.hook.start.reset_mock()
+                self.engine._app_detector.start.reset_mock()
+                self.engine.start()
+                self.assertEqual(self.engine.remote_paused, remote)
+                if remote:
+                    self.engine.hook.start.assert_not_called()
+                    self.engine._app_detector.start.assert_not_called()
+                else:
+                    self.engine.hook.start.assert_called_once()
+                    self.engine._app_detector.start.assert_called_once()
+                self.engine.stop()
+
     def test_paused_hid_callbacks_do_not_restart_device_workers(self):
         self.state = True
         self.engine.start()

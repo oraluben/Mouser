@@ -89,12 +89,13 @@ class Engine:
         self.hook = MouseHook()
         self.cfg = load_config()
         self._enabled = True
-        self._started = False
-        self._runtime_started = False
-        self._runtime_lock = threading.RLock()
-        self._remote_session_state = None
-        self._remote_paused = False
-        self._remote_session_change_cb = None
+        # start()/stop() lifecycle; stays started while input is auto-paused.
+        self._engine_started = False
+        # Serialize lifecycle changes; notifications can re-enter on this thread.
+        self._lifecycle_lock = threading.RLock()
+        self._session_type = "unknown"       # last observation: local/remote/unknown
+        self._auto_paused = False           # applied policy, independent of _enabled
+        self._session_change_cb = None      # UI callback: (session_type, paused)
         self._last_haptic_time = 0.0
         self._hscroll_state = {
             MouseEvent.HSCROLL_LEFT: {"accum": 0.0, "last_fire_at": 0.0},
@@ -128,6 +129,7 @@ class Engine:
         self._replay_pending_rerun = False
         self._replay_lock = threading.Lock()
         self._mouse_release_timers = {}   # action_id → Timer for safety auto-release
+        # Serialize mouse injection and release timers against pause cleanup.
         self._mouse_button_lock = threading.Lock()
         self._ring = None                 # ActionsRingController (created in _setup_hooks)
         self._ring_show_cb = None         # UI callback for showing ring overlay
@@ -1493,42 +1495,49 @@ class Engine:
 
     @property
     def remote_paused(self):
-        return self._remote_paused
+        return self._auto_paused
 
     @property
     def remote_session_state(self):
-        if self._remote_session_state is None:
-            return "unknown"
-        return "remote" if self._remote_session_state else "local"
+        return self._session_type
 
     @property
     def remapping_active(self):
         return self._enabled and not self.remote_paused
 
     def set_remote_session_change_callback(self, cb):
-        self._remote_session_change_cb = cb
+        self._session_change_cb = cb
 
     def refresh_remote_session(self):
-        """Called at startup and by the frontend's session notification watcher."""
-        with self._runtime_lock:
-            if not self._started:
+        """Recheck policy without reviving an explicitly stopped engine."""
+        with self._lifecycle_lock:
+            if not self._engine_started:
                 return
-            state = is_remote_session()
-            paused = (sys.platform == "win32" and state is not False
-                      and self.cfg.get("settings", {}).get("pause_in_remote_session", True))
-            was_paused = self._remote_paused
-            changed = state != self._remote_session_state or paused != was_paused
-            self._remote_session_state = state
-            self._remote_paused = paused
-            if paused:
-                if not was_paused:
-                    self._stop_runtime()
-            elif not self._runtime_started:
-                self._start_runtime()
-            if changed:
-                print(f"[Engine] Session={self.remote_session_state}, paused={paused}")
-                if self._remote_session_change_cb:
-                    self._remote_session_change_cb(self.remote_session_state, paused)
+            self._apply_remote_session_policy()
+
+    def _apply_remote_session_policy(self, *, initial_start=False):
+        """Apply detection under _lifecycle_lock, before starting any input runtime."""
+        detected_remote = is_remote_session()
+        session_type = ("unknown" if detected_remote is None
+                        else "remote" if detected_remote else "local")
+        paused = (sys.platform == "win32" and detected_remote is not False
+                  and self.cfg.get("settings", {}).get("pause_in_remote_session", True))
+        was_paused = self._auto_paused
+        changed = session_type != self._session_type or paused != was_paused
+        self._session_type = session_type
+        # Store the applied decision before cleanup so queued handlers see it.
+        # Deriving this from cfg would lose the previous state when a UI toggle
+        # updates cfg before asking us to apply the new policy.
+        self._auto_paused = paused
+        if paused:
+            if not was_paused:
+                self._stop_runtime()
+        elif initial_start or was_paused:
+            self._start_runtime()
+        if changed:
+            print(f"[Engine] Session={session_type}, paused={paused}")
+            if self._session_change_cb:
+                self._session_change_cb(session_type, paused)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1682,14 +1691,14 @@ class Engine:
             self._emit_status(status_message)
 
     def start(self):
-        with self._runtime_lock:
-            self._started = True
-            self.refresh_remote_session()
+        with self._lifecycle_lock:
+            initial_start = not self._engine_started
+            self._engine_started = True
+            self._apply_remote_session_policy(initial_start=initial_start)
 
     def _start_runtime(self):
         self.hook.reset_bindings()
         self._setup_hooks()
-        self._runtime_started = True
         self._emit_linux_permission_warning()
         self.hook.start()
         self._app_detector.start()
@@ -1711,12 +1720,11 @@ class Engine:
         self._smart_shift_read_cb = cb
 
     def stop(self):
-        with self._runtime_lock:
-            self._started = False
+        with self._lifecycle_lock:
+            self._engine_started = False
             self._stop_runtime()
 
     def _stop_runtime(self):
-        self._runtime_started = False
         self.hook.reset_bindings()
         self.hook.invert_vscroll = False
         self.hook.invert_hscroll = False
