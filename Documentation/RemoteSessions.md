@@ -6,9 +6,17 @@ remote copy does not reverse scrolling, consume mouse buttons, execute volume
 actions, or inject shortcuts. Windows still receives input the client forwards.
 
 The **Point & Scroll → Remote Desktop → Automatically pause Mouser in remote
-desktop sessions** switch disables this policy when the old behavior is wanted.
-Mappings, scroll preferences, and the manual remapping toggle are preserved.
-Settings can be edited while paused and take effect on the next local resume.
+desktop sessions** switch is enabled by default. When checked, it applies the
+pause behavior described above. When unchecked, Mouser keeps the previous remote
+behavior, including device discovery and input processing under the existing
+device and manual-enable conditions. It does not selectively filter RDP input
+or distinguish it from physically connected mouse input.
+
+Changing the switch takes effect immediately, including inside an existing RDP
+session, and the choice is saved across restarts. Mappings, scroll preferences,
+and the manual remapping toggle are preserved. The main window and settings
+remain available while paused. Edited settings take effect on the next resume,
+whether by unchecking the switch or returning to the local console.
 
 | Scenario | Expected behavior with auto-pause enabled |
 | --- | --- |
@@ -40,3 +48,25 @@ startup, local/remote transitions, opt-out, unknown session detection, stale
 callbacks, held-button cleanup, and queued scroll cleanup. Manual verification
 should connect/disconnect RDP and return to console using the same running app,
 checking that only the client maps input and the warning does not repeat.
+
+## Extension boundary
+
+Connection detection stays separate from pause policy and runtime start/stop:
+`core/remote_session.py` reports the current state, `core/engine.py` applies the
+saved auto-pause choice, and `ui/windows_session_monitor.py` requests refreshes.
+The engine does not query WTS directly or inspect remote-control processes.
+
+Future integrations should fit behind the detection interface and supply their
+own change notifications. Provider-specific status, affected desktop/session,
+and pause reasons can be added through a richer detection result with a
+compatibility wrapper; callers should not need to know each provider's API.
+An unsupported optional provider must not be treated as the existing unknown
+RDP state or pause the runtime merely because its server process is present.
+
+Console-sharing tools may share the local desktop rather than create an RDP
+session, so their connection status and input provenance are separate concerns.
+Do not assume that discovering a physical mouse identifies the source of every
+input event. The auto-pause choice remains independent of such future detection.
+
+This is an interface boundary only. No additional providers, detection heuristics,
+configuration options, or per-event filtering are implemented in this change.
